@@ -10,7 +10,7 @@ const server = http.createServer(app);
 // Enable CORS for your frontend
 const io = socketIo(server, {
   cors: {
-    origin: ["https://zeptac-iot-platform-vp3h.vercel.app", "http://localhost:5175","https://zeptac-iot-platform-vp3h-haru65s-projects.vercel.app","*"],
+    origin: ["https://zeptac-iot-platform-vp3h-git-main-haru65s-projects.vercel.app", "http://localhost:5175","*","https://zeptac-iot-platform-vp3h.vercel.app","https://zeptac-iot-platform-vp3h-git-main-haru65s-projects.vercel.app?_vercel_share=MMl5C8aRkEJUjSTYG6PgldTRKiDl8a79"],
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -19,62 +19,54 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// MQTT Configuration for TWO BROKERS
-const ORIGINAL_BROKER = {
+// BROKER 1: Original Device (Zeptac Broker)
+const originalBroker = {
   url: 'mqtt://broker.zeptac.com:1883',
   topic: 'devices/123/data',
-  clientId: 'original-client-' + Math.random().toString(16).substr(2, 8),
   options: {
+    clientId: 'original-client-' + Math.random().toString(16).substr(2, 8),
     username: 'zeptac_iot',
     password: 'ZepIOT@123',
     keepalive: 60,
-    reconnectPeriod: 1000,
-    connectTimeout: 30 * 1000,
-    clean: true
+    reconnectPeriod: 1000
   }
 };
 
-const SIMULATED_BROKER = {
+// BROKER 2: Simulated Device (Test Mosquitto)
+const simulatedBroker = {
   url: 'mqtt://test.mosquitto.org',
   topic: 'devices/234/data',
-  clientId: 'sim-client-' + Math.random().toString(16).substr(2, 8),
   options: {
+    clientId: 'simulated-client-' + Math.random().toString(16).substr(2, 8),
     keepalive: 60,
-    reconnectPeriod: 1000,
-    connectTimeout: 30 * 1000,
-    clean: true
+    reconnectPeriod: 1000
   }
 };
 
 // Create two separate MQTT clients
-const originalClient = mqtt.connect(ORIGINAL_BROKER.url, {
-  ...ORIGINAL_BROKER.options,
-  clientId: ORIGINAL_BROKER.clientId
-});
+const originalClient = mqtt.connect(originalBroker.url, originalBroker.options);
+const simulatedClient = mqtt.connect(simulatedBroker.url, simulatedBroker.options);
 
-const simulatedClient = mqtt.connect(SIMULATED_BROKER.url, {
-  ...SIMULATED_BROKER.options,
-  clientId: SIMULATED_BROKER.clientId
-});
-
-// Store device data and connection status
+// Store device data (keeping old structure for frontend compatibility)
 let deviceData = {
-  original: null,
-  simulated: null,
-  active: null,
-  lastOriginalMessage: null
+  main: null,    // This will be the ACTIVE device
+  sim: null,     // This will store the simulated device
+  original: null, // Internal storage for original device
+  active: null   // Track which is active: 'original' or 'simulated'
 };
 
+// Priority management
+let lastOriginalMessage = null;
+const ORIGINAL_TIMEOUT = 30000; // 30 seconds
+let timeoutTimer = null;
+
+// Connection status
 let connectionStatus = {
-  original: { connected: false, subscribed: false },
-  simulated: { connected: false, subscribed: false }
+  original: false,
+  simulated: false
 };
 
-// Priority settings
-const ORIGINAL_DEVICE_TIMEOUT = 30000; // 30 seconds
-let originalDeviceTimer = null;
-
-// Helper function to transform MQTT data
+// Helper function to transform device data
 function transformDeviceData(payload, source, topic) {
   return {
     id: payload.SPN?.toString() ?? payload.SN?.toString() ?? "N/A",
@@ -88,19 +80,17 @@ function transformDeviceData(payload, source, topic) {
     timestamp: Date.now(),
     source: source,
     topic: topic,
-    rawData: payload,
     metrics: Object.keys(payload)
       .filter(k => !['API', 'EVENT', 'TimeStamp', 'LATITUDE', 'LONGITUDE', 'SN', 'SPN', 'LOG'].includes(k))
       .map(k => ({
         type: k,
         value: parseFloat(payload[k]) || payload[k],
         unit: getUnitForMetric(k),
-        icon: getIconForMetric(k)
+        icon: k === 'DCV' || k === 'ACV' ? 'bi-battery' : k === 'DCI' || k === 'ACI' ? 'bi-lightning-charge' : 'bi-graph-up'
       }))
   };
 }
 
-// Helper functions for metrics
 function getUnitForMetric(metric) {
   const units = {
     'ACV': 'V', 'DCV': 'V', 'ACI': 'A', 'DCI': 'A',
@@ -109,55 +99,65 @@ function getUnitForMetric(metric) {
   return units[metric] || '';
 }
 
-function getIconForMetric(metric) {
-  const icons = {
-    'ACV': 'bi-lightning', 'DCV': 'bi-battery', 'ACI': 'bi-lightning-charge',
-    'DCI': 'bi-power', 'REF1': 'bi-speedometer', 'REF2': 'bi-speedometer',
-    'OCV': 'bi-battery-half'
-  };
-  return icons[metric] || 'bi-graph-up';
-}
-
-// Function to switch back to simulated device after timeout
-function scheduleSimulatedDeviceFallback() {
-  if (originalDeviceTimer) {
-    clearTimeout(originalDeviceTimer);
+// Function to set active device (compatible with frontend)
+function setActiveDevice(deviceType, deviceInfo) {
+  deviceData.active = deviceType;
+  
+  console.log(`🎯 Active device set to: ${deviceType}`);
+  
+  if (deviceType === 'original') {
+    // Original device becomes the "main" device for frontend
+    deviceData.main = deviceInfo;
+    deviceData.original = deviceInfo;
+    
+    // Send as "main" type for frontend compatibility
+    io.emit('deviceUpdate', { type: 'main', data: deviceInfo });
+  } else if (deviceType === 'simulated') {
+    // Simulated device becomes the "main" device for frontend
+    deviceData.main = deviceInfo;
+    
+    // Send as "main" type for frontend compatibility
+    io.emit('deviceUpdate', { type: 'main', data: deviceInfo });
   }
   
-  originalDeviceTimer = setTimeout(() => {
-    console.log('⏰ Original device timeout - switching to simulated device');
-    if (deviceData.simulated && deviceData.active === 'original') {
-      deviceData.active = 'simulated';
-      io.emit('deviceUpdate', { 
-        type: 'active', 
-        data: deviceData.simulated,
-        source: 'simulated'
-      });
-      io.emit('deviceStatus', { 
-        originalDeviceActive: false,
-        message: 'Switched to simulated device due to original device timeout'
-      });
+  // Also send status update
+  io.emit('deviceStatus', { 
+    originalDeviceActive: deviceType === 'original',
+    activeDevice: deviceType,
+    message: `Active: ${deviceType} device`
+  });
+}
+
+// Timeout function for original device
+function resetOriginalTimeout() {
+  if (timeoutTimer) {
+    clearTimeout(timeoutTimer);
+  }
+  
+  timeoutTimer = setTimeout(() => {
+    console.log('⏰ Original device timeout - switching to simulated');
+    
+    if (deviceData.sim && deviceData.active === 'original') {
+      setActiveDevice('simulated', deviceData.sim);
     }
-  }, ORIGINAL_DEVICE_TIMEOUT);
+  }, ORIGINAL_TIMEOUT);
 }
 
 // ORIGINAL DEVICE CLIENT (Zeptac Broker)
 originalClient.on('connect', () => {
-  connectionStatus.original.connected = true;
-  console.log('✅ Original device client connected to Zeptac broker');
+  connectionStatus.original = true;
+  console.log('✅ Connected to Original Device Broker (Zeptac)');
   
-  originalClient.subscribe(ORIGINAL_BROKER.topic, { qos: 1 }, (err, granted) => {
+  originalClient.subscribe(originalBroker.topic, { qos: 1 }, (err) => {
     if (!err) {
-      connectionStatus.original.subscribed = true;
-      console.log(`✅ Subscribed to original device topic: ${ORIGINAL_BROKER.topic}`);
-      io.emit('brokerStatus', { 
+      console.log(`✅ Subscribed to original topic: ${originalBroker.topic}`);
+      io.emit('connectionStatus', { 
         type: 'original', 
-        connected: true, 
-        subscribed: true,
-        message: 'Original device broker connected'
+        connected: true,
+        message: 'Original broker connected'
       });
     } else {
-      console.error('❌ Original device subscription error:', err);
+      console.error('❌ Original subscription error:', err);
     }
   });
 });
@@ -165,33 +165,14 @@ originalClient.on('connect', () => {
 originalClient.on('message', (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
-    console.log(`📨 Original device message from ${topic}:`, payload);
+    console.log(`📨 ORIGINAL device message:`, payload);
     
     const deviceInfo = transformDeviceData(payload, 'original', topic);
+    lastOriginalMessage = Date.now();
     
-    // Original device has priority
-    deviceData.original = deviceInfo;
-    deviceData.active = 'original';
-    deviceData.lastOriginalMessage = Date.now();
-    
-    // Reset timeout timer
-    scheduleSimulatedDeviceFallback();
-    
-    // Emit to frontend
-    io.emit('deviceUpdate', { 
-      type: 'original', 
-      data: deviceInfo,
-      source: 'original'
-    });
-    io.emit('deviceUpdate', { 
-      type: 'active', 
-      data: deviceInfo,
-      source: 'original'
-    });
-    io.emit('deviceStatus', { 
-      originalDeviceActive: true,
-      message: 'Switched to original device'
-    });
+    // Original device ALWAYS takes priority
+    setActiveDevice('original', deviceInfo);
+    resetOriginalTimeout();
     
   } catch (error) {
     console.error('❌ Error parsing original device message:', error);
@@ -199,44 +180,35 @@ originalClient.on('message', (topic, message) => {
 });
 
 originalClient.on('error', (error) => {
-  connectionStatus.original.connected = false;
-  console.error('❌ Original device client error:', error);
-  io.emit('brokerStatus', { 
+  connectionStatus.original = false;
+  console.error('❌ Original client error:', error);
+  io.emit('connectionStatus', { 
     type: 'original', 
-    connected: false, 
-    error: error.message,
-    message: 'Original device broker error'
+    connected: false,
+    error: error.message
   });
 });
 
 originalClient.on('close', () => {
-  connectionStatus.original.connected = false;
-  connectionStatus.original.subscribed = false;
-  console.log('🔌 Original device client disconnected');
-  io.emit('brokerStatus', { 
-    type: 'original', 
-    connected: false,
-    message: 'Original device broker disconnected'
-  });
+  connectionStatus.original = false;
+  console.log('🔌 Original client disconnected');
 });
 
-// SIMULATED DEVICE CLIENT (Test Mosquitto Broker)
+// SIMULATED DEVICE CLIENT (Test Mosquitto)
 simulatedClient.on('connect', () => {
-  connectionStatus.simulated.connected = true;
-  console.log('✅ Simulated device client connected to test.mosquitto.org');
+  connectionStatus.simulated = true;
+  console.log('✅ Connected to Simulated Device Broker (Mosquitto)');
   
-  simulatedClient.subscribe(SIMULATED_BROKER.topic, { qos: 1 }, (err, granted) => {
+  simulatedClient.subscribe(simulatedBroker.topic, { qos: 1 }, (err) => {
     if (!err) {
-      connectionStatus.simulated.subscribed = true;
-      console.log(`✅ Subscribed to simulated device topic: ${SIMULATED_BROKER.topic}`);
-      io.emit('brokerStatus', { 
+      console.log(`✅ Subscribed to simulated topic: ${simulatedBroker.topic}`);
+      io.emit('connectionStatus', { 
         type: 'simulated', 
-        connected: true, 
-        subscribed: true,
-        message: 'Simulated device broker connected'
+        connected: true,
+        message: 'Simulated broker connected'
       });
     } else {
-      console.error('❌ Simulated device subscription error:', err);
+      console.error('❌ Simulated subscription error:', err);
     }
   });
 });
@@ -244,31 +216,18 @@ simulatedClient.on('connect', () => {
 simulatedClient.on('message', (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
-    console.log(`📨 Simulated device message from ${topic}:`, payload);
+    console.log(`📨 SIMULATED device message:`, payload);
     
     const deviceInfo = transformDeviceData(payload, 'simulated', topic);
-    deviceData.simulated = deviceInfo;
+    deviceData.sim = deviceInfo; // Always store simulated device
     
-    // Only make simulated device active if original device is not active
+    // Always emit simulated device as "sim" type for monitoring
+    io.emit('deviceUpdate', { type: 'sim', data: deviceInfo });
+    
+    // Only use simulated as main if original is not active
     if (deviceData.active !== 'original') {
-      deviceData.active = 'simulated';
-      io.emit('deviceUpdate', { 
-        type: 'active', 
-        data: deviceInfo,
-        source: 'simulated'
-      });
-      io.emit('deviceStatus', { 
-        originalDeviceActive: false,
-        message: 'Using simulated device'
-      });
+      setActiveDevice('simulated', deviceInfo);
     }
-    
-    // Always emit simulated device data for monitoring
-    io.emit('deviceUpdate', { 
-      type: 'simulated', 
-      data: deviceInfo,
-      source: 'simulated'
-    });
     
   } catch (error) {
     console.error('❌ Error parsing simulated device message:', error);
@@ -276,87 +235,26 @@ simulatedClient.on('message', (topic, message) => {
 });
 
 simulatedClient.on('error', (error) => {
-  connectionStatus.simulated.connected = false;
-  console.error('❌ Simulated device client error:', error);
-  io.emit('brokerStatus', { 
-    type: 'simulated', 
-    connected: false, 
-    error: error.message,
-    message: 'Simulated device broker error'
-  });
+  connectionStatus.simulated = false;
+  console.error('❌ Simulated client error:', error);
 });
 
 simulatedClient.on('close', () => {
-  connectionStatus.simulated.connected = false;
-  connectionStatus.simulated.subscribed = false;
-  console.log('🔌 Simulated device client disconnected');
-  io.emit('brokerStatus', { 
-    type: 'simulated', 
-    connected: false,
-    message: 'Simulated device broker disconnected'
-  });
+  connectionStatus.simulated = false;
+  console.log('🔌 Simulated client disconnected');
 });
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('🔗 Client connected:', socket.id);
   
-  // Send current device data and connection status to newly connected client
+  // Send current state to new client (old format for compatibility)
   socket.emit('initialData', {
-    ...deviceData,
+    main: deviceData.main,
+    sim: deviceData.sim,
     originalDeviceActive: deviceData.active === 'original',
-    lastOriginalMessage: deviceData.lastOriginalMessage,
-    connectionStatus
-  });
-  
-  // Send broker status
-  socket.emit('brokerStatus', { 
-    type: 'original', 
-    connected: connectionStatus.original.connected,
-    subscribed: connectionStatus.original.subscribed,
-    message: connectionStatus.original.connected ? 'Connected' : 'Disconnected'
-  });
-  
-  socket.emit('brokerStatus', { 
-    type: 'simulated', 
-    connected: connectionStatus.simulated.connected,
-    subscribed: connectionStatus.simulated.subscribed,
-    message: connectionStatus.simulated.connected ? 'Connected' : 'Disconnected'
-  });
-  
-  // Handle manual device switching
-  socket.on('switchToOriginal', () => {
-    if (deviceData.original) {
-      deviceData.active = 'original';
-      scheduleSimulatedDeviceFallback();
-      io.emit('deviceUpdate', { 
-        type: 'active', 
-        data: deviceData.original,
-        source: 'original'
-      });
-      io.emit('deviceStatus', { 
-        originalDeviceActive: true,
-        message: 'Manually switched to original device'
-      });
-    }
-  });
-  
-  socket.on('switchToSimulated', () => {
-    if (deviceData.simulated) {
-      deviceData.active = 'simulated';
-      if (originalDeviceTimer) {
-        clearTimeout(originalDeviceTimer);
-      }
-      io.emit('deviceUpdate', { 
-        type: 'active', 
-        data: deviceData.simulated,
-        source: 'simulated'
-      });
-      io.emit('deviceStatus', { 
-        originalDeviceActive: false,
-        message: 'Manually switched to simulated device'
-      });
-    }
+    lastOriginalMessage: lastOriginalMessage,
+    connectionStatus: connectionStatus
   });
   
   socket.on('disconnect', () => {
@@ -369,10 +267,11 @@ app.get('/api/devices', (req, res) => {
   res.json({
     success: true,
     data: {
-      ...deviceData,
+      main: deviceData.main,
+      sim: deviceData.sim,
       originalDeviceActive: deviceData.active === 'original',
-      lastOriginalMessage: deviceData.lastOriginalMessage,
-      connectionStatus
+      lastOriginalMessage: lastOriginalMessage,
+      connectionStatus: connectionStatus
     }
   });
 });
@@ -382,45 +281,26 @@ app.get('/api/brokers/status', (req, res) => {
     success: true,
     brokers: {
       original: {
-        url: ORIGINAL_BROKER.url,
-        topic: ORIGINAL_BROKER.topic,
-        connected: connectionStatus.original.connected,
-        subscribed: connectionStatus.original.subscribed
+        url: originalBroker.url,
+        topic: originalBroker.topic,
+        connected: connectionStatus.original
       },
       simulated: {
-        url: SIMULATED_BROKER.url,
-        topic: SIMULATED_BROKER.topic,
-        connected: connectionStatus.simulated.connected,
-        subscribed: connectionStatus.simulated.subscribed
+        url: simulatedBroker.url,
+        topic: simulatedBroker.topic,
+        connected: connectionStatus.simulated
       }
     }
   });
 });
 
-app.get('/api/device/status', (req, res) => {
-  res.json({
-    success: true,
-    active: deviceData.active,
-    originalDeviceActive: deviceData.active === 'original',
-    lastOriginalMessage: deviceData.lastOriginalMessage,
-    hasOriginalDevice: !!deviceData.original,
-    hasSimulatedDevice: !!deviceData.simulated,
-    connectionStatus
-  });
-});
-
-// Test endpoints for both brokers
-app.post('/api/test/publish/original', (req, res) => {
-  const { message } = req.body;
-  
-  if (!connectionStatus.original.connected) {
-    return res.status(503).json({ 
-      success: false, 
-      message: 'Original broker not connected' 
-    });
+// Test endpoints
+app.post('/api/test/original', (req, res) => {
+  if (!connectionStatus.original) {
+    return res.status(503).json({ success: false, message: 'Original broker not connected' });
   }
   
-  const testMessage = message || {
+  const testMessage = {
     "LOG": 33,
     "ACI": "1.5",
     "LONGITUDE": 77.5946,
@@ -436,26 +316,21 @@ app.post('/api/test/publish/original', (req, res) => {
     "LATITUDE": 12.9716
   };
   
-  originalClient.publish(ORIGINAL_BROKER.topic, JSON.stringify(testMessage), (err) => {
+  originalClient.publish(originalBroker.topic, JSON.stringify(testMessage), (err) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
     } else {
-      res.json({ success: true, message: 'Test message published to original broker' });
+      res.json({ success: true, message: 'Published to original broker' });
     }
   });
 });
 
-app.post('/api/test/publish/simulated', (req, res) => {
-  const { message } = req.body;
-  
-  if (!connectionStatus.simulated.connected) {
-    return res.status(503).json({ 
-      success: false, 
-      message: 'Simulated broker not connected' 
-    });
+app.post('/api/test/simulated', (req, res) => {
+  if (!connectionStatus.simulated) {
+    return res.status(503).json({ success: false, message: 'Simulated broker not connected' });
   }
   
-  const testMessage = message || {
+  const testMessage = {
     "LOG": 33,
     "ACI": "2.1",
     "LONGITUDE": 0,
@@ -471,11 +346,11 @@ app.post('/api/test/publish/simulated', (req, res) => {
     "LATITUDE": 0
   };
   
-  simulatedClient.publish(SIMULATED_BROKER.topic, JSON.stringify(testMessage), (err) => {
+  simulatedClient.publish(simulatedBroker.topic, JSON.stringify(testMessage), (err) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
     } else {
-      res.json({ success: true, message: 'Test message published to simulated broker' });
+      res.json({ success: true, message: 'Published to simulated broker' });
     }
   });
 });
@@ -485,10 +360,9 @@ app.get('/api/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     activeDevice: deviceData.active,
-    originalDeviceActive: deviceData.active === 'original',
     brokers: {
-      original: connectionStatus.original.connected,
-      simulated: connectionStatus.simulated.connected
+      original: connectionStatus.original,
+      simulated: connectionStatus.simulated
     }
   });
 });
@@ -496,21 +370,19 @@ app.get('/api/health', (req, res) => {
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`🚀 Backend server running on port ${PORT}`);
-  console.log('📡 MQTT Brokers:');
-  console.log(`   - Original: ${ORIGINAL_BROKER.url} (${ORIGINAL_BROKER.topic})`);
-  console.log(`   - Simulated: ${SIMULATED_BROKER.url} (${SIMULATED_BROKER.topic})`);
+  console.log(`📡 Dual Broker Setup:`);
+  console.log(`   - Original: ${originalBroker.url} (${originalBroker.topic})`);
+  console.log(`   - Simulated: ${simulatedBroker.url} (${simulatedBroker.topic})`);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('⏹️ Shutting down gracefully...');
-  if (originalDeviceTimer) {
-    clearTimeout(originalDeviceTimer);
+  if (timeoutTimer) {
+    clearTimeout(timeoutTimer);
   }
   originalClient.end();
   simulatedClient.end();
   server.close();
   process.exit(0);
 });
-
-
