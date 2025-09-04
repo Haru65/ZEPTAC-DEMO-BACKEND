@@ -10,7 +10,7 @@ const server = http.createServer(app);
 // Enable CORS for your frontend
 const io = socketIo(server, {
   cors: {
-    origin: ["https://zeptac-iot-platform-vp3h-git-main-haru65s-projects.vercel.app", "http://localhost:5175"],
+    origin: ["https://zeptac-iot-platform-vp3h.vercel.app", "http://localhost:5175"],
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -512,3 +512,4 @@ process.on('SIGINT', () => {
   server.close();
   process.exit(0);
 });
+
