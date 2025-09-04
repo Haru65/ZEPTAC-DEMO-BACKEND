@@ -18,10 +18,10 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// BROKER CONFIGURATIONS
+// Broker Configurations
 const originalBroker = {
   url: 'mqtt://broker.zeptac.com:1883',
-  topic: 'devices/123/data',  // ORIGINAL DEVICE (priority when active)
+  topic: 'devices/123/data',
   options: {
     clientId: 'original-client-' + Math.random().toString(16).substr(2, 8),
     username: 'zeptac_iot',
@@ -35,7 +35,7 @@ const originalBroker = {
 
 const simulatedBroker = {
   url: 'mqtt://test.mosquitto.org',
-  topic: 'devices/234/data',  // AAA DEVICE (default main device)
+  topic: 'devices/234/data',
   options: {
     clientId: 'simulated-client-' + Math.random().toString(16).substr(2, 8),
     keepalive: 45,
@@ -48,27 +48,31 @@ const simulatedBroker = {
 const originalClient = mqtt.connect(originalBroker.url, originalBroker.options);
 const simulatedClient = mqtt.connect(simulatedBroker.url, simulatedBroker.options);
 
-// Device data management
+// Device data with sticky switching
 let deviceData = {
-  main: null,        // The active main device shown in frontend
-  sim: null,         // Always the AAA device for reference
-  original: null,    // Original device data when available
-  defaultDevice: 'aaa'  // Default is AAA device
+  main: null,
+  sim: null,
+  original: null,
+  mainSource: 'aaa', // default to AAA device
 };
 
-// State tracking
-let lastOriginalMessage = null;
-const ORIGINAL_TIMEOUT = 30000; // 30 seconds before reverting to AAA
+// State tracking for original device messages
+let lastOriginalTimestamp = 0;
+const ORIGINAL_TIMEOUT = 30000; // 30 seconds
 let timeoutTimer = null;
 let connectionStatus = {
   original: false,
   simulated: false
 };
 
-// Rate limiting
-const UPDATE_THROTTLE = 1500;
-let lastUpdateTimes = { main: 0, sim: 0 };
+// Rate limiting for frontend updates
+const UPDATE_THROTTLE = 1000; // 1 second
+let lastUpdateTimes = {
+  main: 0,
+  sim: 0
+};
 
+// Transform MQTT payload to frontend format
 function transformDeviceData(payload, source, topic) {
   return {
     id: payload.SPN?.toString() ?? payload.SN?.toString() ?? "N/A",
@@ -91,83 +95,85 @@ function transformDeviceData(payload, source, topic) {
   };
 }
 
+// Throttled emit function to avoid flooding frontend
 function throttledEmit(updateType, data) {
   const now = Date.now();
   const lastUpdate = lastUpdateTimes[updateType] || 0;
-  
+
   if (now - lastUpdate >= UPDATE_THROTTLE) {
     io.emit('deviceUpdate', { type: updateType, data: data });
     lastUpdateTimes[updateType] = now;
-    console.log(`📤 ${updateType} update sent: ${data.name}`);
+    console.log(`📤 Sent ${updateType} update: ${data.name}`);
   }
 }
 
-// Handle original device timeout - revert to AAA
-function handleOriginalTimeout() {
-  if (timeoutTimer) {
-    clearTimeout(timeoutTimer);
+// Set the main device ONLY upon receiving its data
+function setMainDevice(deviceInfo, source) {
+  if (deviceData.mainSource === source) {
+    // Already main device, just update data
+    deviceData.main = deviceInfo;
+    throttledEmit('main', deviceInfo);
+    return;
   }
-  
+
+  console.log(`🎯 Switching main device to: ${source}`);
+
+  deviceData.main = deviceInfo;
+  deviceData.mainSource = source;
+
+  throttledEmit('main', deviceInfo);
+
+  io.emit('deviceStatus', {
+    activeDevice: source,
+    originalActive: source === 'original',
+    message: source === 'original' ? 'Switched to original device' : 'Switched to AAA device'
+  });
+}
+
+// Reset timer for reverting to AAA device on original timeout
+function setOriginalTimeout() {
+  if (timeoutTimer) clearTimeout(timeoutTimer);
+
   timeoutTimer = setTimeout(() => {
-    console.log('⏰ Original device timeout - reverting to AAA device');
-    
+    console.log('⏰ Original device timed out; reverting to AAA device');
+
     if (deviceData.sim) {
-      deviceData.main = deviceData.sim;
-      deviceData.defaultDevice = 'aaa';
-      throttledEmit('main', deviceData.sim);
-      
-      io.emit('deviceStatus', {
-        activeDevice: 'aaa',
-        originalActive: false,
-        message: 'Reverted to AAA device (original timeout)'
-      });
+      setMainDevice(deviceData.sim, 'aaa');
     }
+
   }, ORIGINAL_TIMEOUT);
 }
 
-// ORIGINAL DEVICE CLIENT (devices/123/data)
+// Handle messages from original device broker
 originalClient.on('connect', () => {
   connectionStatus.original = true;
-  console.log('✅ Original device broker connected');
-  
+  console.log('✅ Connected to original device broker');
+
   originalClient.subscribe(originalBroker.topic, { qos: 0 }, (err) => {
-    if (!err) {
-      console.log(`✅ Subscribed to original: ${originalBroker.topic}`);
-    }
+    if (!err) console.log(`✅ Subscribed to original device topic: ${originalBroker.topic}`);
   });
 });
 
 originalClient.on('message', (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
-    console.log(`📨 ORIGINAL DEVICE MESSAGE: ${payload.API || 'Original'}`);
-    
+    console.log(`📨 Received original device message`);
+
     const deviceInfo = transformDeviceData(payload, 'original', topic);
     deviceData.original = deviceInfo;
-    lastOriginalMessage = Date.now();
-    
-    // SWITCH TO ORIGINAL (priority)
-    deviceData.main = deviceInfo;
-    deviceData.defaultDevice = 'original';
-    throttledEmit('main', deviceInfo);
-    
-    io.emit('deviceStatus', {
-      activeDevice: 'original',
-      originalActive: true,
-      message: 'Switched to original device'
-    });
-    
-    // Set timeout to revert back to AAA
-    handleOriginalTimeout();
-    
+    lastOriginalTimestamp = Date.now();
+
+    setMainDevice(deviceInfo, 'original');
+    setOriginalTimeout();
+
   } catch (error) {
-    console.error('❌ Original device parsing error:', error.message);
+    console.error('❌ Failed to parse original device message:', error);
   }
 });
 
 originalClient.on('error', (error) => {
   connectionStatus.original = false;
-  console.error('❌ Original device broker error');
+  console.error('❌ Original device broker error:', error.message);
 });
 
 originalClient.on('close', () => {
@@ -175,43 +181,40 @@ originalClient.on('close', () => {
   console.log('🔌 Original device broker disconnected');
 });
 
-// AAA DEVICE CLIENT (devices/234/data) - DEFAULT MAIN DEVICE
+// Handle messages from AAA device broker (simulated device)
 simulatedClient.on('connect', () => {
   connectionStatus.simulated = true;
-  console.log('✅ AAA device broker connected');
-  
+  console.log('✅ Connected to AAA device broker');
+
   simulatedClient.subscribe(simulatedBroker.topic, { qos: 0 }, (err) => {
-    if (!err) {
-      console.log(`✅ Subscribed to AAA device: ${simulatedBroker.topic}`);
-    }
+    if (!err) console.log(`✅ Subscribed to AAA device topic: ${simulatedBroker.topic}`);
   });
 });
 
 simulatedClient.on('message', (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
-    console.log(`📨 AAA DEVICE MESSAGE: ${payload.API || 'AAA'}`);
-    
+    console.log(`📨 Received AAA device message`);
+
     const deviceInfo = transformDeviceData(payload, 'aaa', topic);
     deviceData.sim = deviceInfo;
-    
-    // Always emit as "sim" for monitoring
+
+    // Always emit sim update for monitoring
     throttledEmit('sim', deviceInfo);
-    
-    // ONLY set as main if original device is not currently active
-    if (deviceData.defaultDevice !== 'original') {
-      deviceData.main = deviceInfo;
-      throttledEmit('main', deviceInfo);
+
+    // Only set AAA as main if original not active
+    if (deviceData.mainSource !== 'original') {
+      setMainDevice(deviceInfo, 'aaa');
     }
-    
+
   } catch (error) {
-    console.error('❌ AAA device parsing error:', error.message);
+    console.error('❌ Failed to parse AAA device message:', error);
   }
 });
 
 simulatedClient.on('error', (error) => {
   connectionStatus.simulated = false;
-  console.error('❌ AAA device broker error');
+  console.error('❌ AAA device broker error:', error.message);
 });
 
 simulatedClient.on('close', () => {
@@ -219,90 +222,49 @@ simulatedClient.on('close', () => {
   console.log('🔌 AAA device broker disconnected');
 });
 
-// Socket.io handling
+// Socket.io connection handling
 io.on('connection', (socket) => {
   console.log(`🔗 Client connected: ${socket.id}`);
-  
-  // Send current data - main will be AAA by default
+
   socket.emit('initialData', {
     main: deviceData.main,
     sim: deviceData.sim,
-    defaultDevice: deviceData.defaultDevice,
+    mainSource: deviceData.mainSource,
     connectionStatus
   });
-  
+
   socket.on('disconnect', () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
   });
 });
 
-// API endpoints
+// REST API endpoints
 app.get('/api/devices', (req, res) => {
   res.json({
     success: true,
     data: {
       main: deviceData.main,
       sim: deviceData.sim,
-      defaultDevice: deviceData.defaultDevice,
-      connectionStatus,
-      originalActive: deviceData.defaultDevice === 'original'
+      mainSource: deviceData.mainSource,
+      connectionStatus
     }
   });
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    activeDevice: deviceData.defaultDevice,
-    connections: connectionStatus
+    activeDevice: deviceData.mainSource,
+    connectionStatus
   });
-});
-
-// Test endpoints
-app.post('/api/test/original', (req, res) => {
-  if (!connectionStatus.original) {
-    return res.status(503).json({ success: false, message: 'Original broker not connected' });
-  }
-  
-  const testMessage = {
-    "ACI": "1.5",
-    "DCI": "2.3",
-    "EVENT": "NORMAL",
-    "TimeStamp": new Date().toISOString(),
-    "ACV": "230.5",
-    "API": "TEST-ORIGINAL",
-    "SPN": Date.now()
-  };
-  
-  originalClient.publish(originalBroker.topic, JSON.stringify(testMessage));
-  res.json({ success: true, message: 'Test message sent to original device' });
-});
-
-app.post('/api/test/aaa', (req, res) => {
-  if (!connectionStatus.simulated) {
-    return res.status(503).json({ success: false, message: 'AAA broker not connected' });
-  }
-  
-  const testMessage = {
-    "ACI": "2.1",
-    "DCI": "1.8",
-    "EVENT": "NORMAL",
-    "TimeStamp": new Date().toISOString(),
-    "ACV": "220.0",
-    "API": "AAA",
-    "SN": Date.now()
-  };
-  
-  simulatedClient.publish(simulatedBroker.topic, JSON.stringify(testMessage));
-  res.json({ success: true, message: 'Test message sent to AAA device' });
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log('🎯 Default: AAA device (devices/234/data)');
-  console.log('🎯 Priority: Original device (devices/123/data)');
+  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🎯 Default main device: AAA (devices/234/data)`);
+  console.log(`🎯 Priority device: Original (devices/123/data)`);
 });
 
 // Graceful shutdown
