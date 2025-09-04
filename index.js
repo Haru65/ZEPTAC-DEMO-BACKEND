@@ -20,7 +20,19 @@ app.use(express.json());
 
 // MQTT Broker configs
 const originalBroker = {
-  url: 'mqtt://broker.zeptac.com:1883',
+  url: 'mqtt://test.mosquitto.org',
+  topic: 'devices/234/data',
+  options: {
+    clientId: 'simulated-client-' + Math.random().toString(16).substr(2, 8),
+    keepalive: 45,
+    reconnectPeriod: 5000,
+    connectTimeout: 10000,
+    clean: true
+  }
+};
+
+const simulatedBroker = {
+   url: 'mqtt://broker.zeptac.com:1883',
   topic: 'devices/123/data',
   options: {
     clientId: 'original-client-' + Math.random().toString(16).substr(2, 8),
@@ -30,18 +42,7 @@ const originalBroker = {
     reconnectPeriod: 10000,
     connectTimeout: 15000,
     clean: true
-  }
-};
-
-const simulatedBroker = {
-  url: 'mqtt://test.mosquitto.org',
-  topic: 'devices/234/data',
-  options: {
-    clientId: 'simulated-client-' + Math.random().toString(16).substr(2, 8),
-    keepalive: 45,
-    reconnectPeriod: 5000,
-    connectTimeout: 10000,
-    clean: true
+ 
   }
 };
 
@@ -237,3 +238,4 @@ process.on('SIGINT', () => {
   server.close();
   process.exit(0);
 });
+
