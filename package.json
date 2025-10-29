@@ -9,6 +9,7 @@
     "joi": "^18.0.1",
     "nodemailer": "^7.0.10",
     "jsonwebtoken": "^9.0.2",
+    "twilio": "^5.10.4",
     "mongoose": "^8.18.2",
     "mqtt": "^5.14.0",
     "nodemon": "^3.1.10",
