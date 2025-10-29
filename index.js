@@ -28,10 +28,14 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: [
-    "https://zeptac-iot-platform-vp3h-an8ipta4q-haru65s-projects.vercel.app/", 
-    "http://localhost:5173"
+    "https://zeptac-iot-platform-vp3h-an8ipta4q-haru65s-projects.vercel.app",
+    "https://zeptac-iot-platform-vp3h-kljhebkdt-haru65s-projects.vercel.app", 
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:5174"
   ],
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true
 }));
 app.use(express.json());
