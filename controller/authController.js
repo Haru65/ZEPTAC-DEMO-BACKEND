@@ -1,6 +1,7 @@
 const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
+const adminService = require('../services/adminService');
 
 // Validation schemas
 const registerSchema = Joi.object({
@@ -80,6 +81,10 @@ class AuthController {
   // Login user
   static async login(req, res) {
     try {
+      // Ensure a default admin user exists before processing login
+      // This will create the admin only if it doesn't exist already.
+      await adminService.ensureAdminExists();
+
       const { error, value } = loginSchema.validate(req.body);
       if (error) {
         return res.status(400).json({

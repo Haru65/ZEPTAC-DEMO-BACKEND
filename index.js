@@ -28,7 +28,7 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: [
-    "https://zeptac-iot-platform-vp3h-kljhebkdt-haru65s-projects.vercel.app", 
+    "https://zeptac-iot-platform-vp3h-an8ipta4q-haru65s-projects.vercel.app/", 
     "http://localhost:5173"
   ],
   methods: ["GET", "POST"],
